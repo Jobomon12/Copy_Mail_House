@@ -1,4 +1,4 @@
-name: Build Copy_Mail_House EXE
+name: Build Copy_Mail_House.exe
 
 on:
   push:
@@ -10,34 +10,34 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - name: 📥 Checkout code
+    - name: Checkout code
       uses: actions/checkout@v3
 
-    - name: 📂 Check working directory and list files
+    - name: Check working directory and list files
       run: |
         echo "Current directory:"
         pwd
         echo "List files:"
         dir
 
-    - name: 🐍 Set up Python
+    - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: 3.11
 
-    - name: 📦 Install dependencies
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r ./requirements.txt
 
-    - name: 🛠 Install PyInstaller
+    - name: Install PyInstaller
       run: pip install pyinstaller
 
-    - name: 🏗️ Build executable
+    - name: Build executable
       run: |
         pyinstaller --noconfirm --onefile --windowed main.py
 
-    - name: 📤 Upload EXE artifact
+    - name: Upload EXE artifact
       uses: actions/upload-artifact@v4
       with:
         name: Copy_Mail_House.exe
