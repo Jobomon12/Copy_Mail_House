@@ -4,22 +4,20 @@ import pandas as pd
 from datetime import datetime, timedelta
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import messagebox, scrolledtext
+from concurrent.futures import ThreadPoolExecutor
 
-# === GUI App ===
 class MailCopyApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("1stEnergy - Copy Mail House")
-        self.geometry("700x500")
+        self.geometry("780x520")
         self.configure(padx=20, pady=20)
 
-        # Default values
         self.default_root = r"Y:\FIRST_LIVE\Documents\Mail Merges"
         self.default_csv = r"C:\Users\manh.nguyen\Downloads\Simulate\Melhouse\Success_Copied.csv"
         self.default_base = r"C:\Users\manh.nguyen\Downloads\Simulate\Melhouse"
 
-        # UI Components
         self.create_widgets()
 
     def create_widgets(self):
@@ -38,7 +36,7 @@ class MailCopyApp(tk.Tk):
         self.entry_base.insert(0, self.default_base)
         self.entry_base.pack(fill='x')
 
-        tk.Button(self, text="Generate", command=self.run_process).pack(pady=10)
+        tk.Button(self, text="Generate", command=self.run_threaded).pack(pady=10)
 
         self.output = scrolledtext.ScrolledText(self, height=20, state='disabled', font=('Consolas', 10))
         self.output.pack(fill='both', expand=True)
@@ -50,8 +48,41 @@ class MailCopyApp(tk.Tk):
         self.output.config(state='disabled')
         self.update()
 
-    def run_process(self):
+    def run_threaded(self):
         threading.Thread(target=self.generate, daemon=True).start()
+
+    def fast_scan(self, path, cutoff):
+        stack = [path]
+        result = []
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name.lower() != "archive":
+                                stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            try:
+                                ctime = datetime.fromtimestamp(entry.stat().st_ctime)
+                                if ctime >= cutoff:
+                                    result.append((entry.path, ctime))
+                            except:
+                                pass
+            except:
+                pass
+        return result
+
+    def copy_file(self, args):
+        src, rel_path, created_dt, root_dir, dest_root = args
+        dst = os.path.join(dest_root, rel_path)
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            folder = rel_path.split(os.sep)[0]
+            return {"FullPath": src, "Created_Datetime": created_dt, "Success": True, "TopFolder": folder}
+        except Exception as e:
+            return {"FullPath": src, "Created_Datetime": created_dt, "Success": False, "Reason": str(e)}
 
     def generate(self):
         import time
@@ -61,30 +92,13 @@ class MailCopyApp(tk.Tk):
         CSV_PATH = self.entry_csv.get()
         BASE_PATH = self.entry_base.get()
 
-        if not os.path.exists(ROOT_DIR):
-            messagebox.showerror("Error", f"ROOT_DIR does not exist: {ROOT_DIR}")
-            return
-
         cutoff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=5)
         self.log("⏱ Scanning for files...")
+        file_list = self.fast_scan(ROOT_DIR, cutoff)
 
-        file_list = []
-        for root, dirs, files in os.walk(ROOT_DIR):
-            if 'archive' in dirs:
-                dirs.remove('archive')
-            for file in files:
-                full_path = os.path.join(root, file)
-                try:
-                    ctime = datetime.fromtimestamp(os.path.getctime(full_path))
-                    if ctime >= cutoff:
-                        file_list.append((full_path, ctime))
-                except Exception as e:
-                    self.log(f"⚠️ Error reading file: {file} - {e}")
-
+        self.log(f"✅ Files to copy: {len(file_list)}")
         df_today = pd.DataFrame(file_list, columns=["FullPath", "Created_Datetime"])
         df_today["Created_Datetime"] = df_today["Created_Datetime"].dt.strftime("%d/%m/%Y %H:%M:%S")
-
-        self.log(f"✅ Files to copy: {len(df_today)}")
 
         try:
             df_existing = pd.read_csv(CSV_PATH)
@@ -93,66 +107,58 @@ class MailCopyApp(tk.Tk):
             df_existing = pd.DataFrame(columns=["FullPath", "Created_Datetime"])
 
         new_files = df_today[~df_today["FullPath"].isin(df_existing["FullPath"])]
+        self.log(f"🔍 New files: {len(new_files)}")
 
-        # === Create Destination Directory ===
         today = datetime.today()
         year = today.strftime("%Y")
         month = today.strftime("%m %B")
         day = today.strftime("%d-%m-%Y")
-
-        destination_dir = os.path.join(BASE_PATH, year, month, day)
-        os.makedirs(destination_dir, exist_ok=True)
+        dest_root = os.path.join(BASE_PATH, year, month, day)
+        os.makedirs(dest_root, exist_ok=True)
 
         subfolders = [f"Invoices {i if i > 1 else ''}" for i in range(1, 6)]
         for sub in subfolders:
-            os.makedirs(os.path.join(destination_dir, sub), exist_ok=True)
+            os.makedirs(os.path.join(dest_root, sub), exist_ok=True)
 
-        self.log(f"✅ Created or found: {destination_dir}")
+        self.log(f"✅ Created or found: {dest_root}")
         self.log("📂 Subfolders created:")
         for sub in subfolders:
             self.log(f"   - {sub}")
 
-        # === Copy Files ===
         self.log("🚚 Copying files in parallel...")
-        success, fail, stats = [], [], {}
-
+        args_list = []
         for _, row in new_files.iterrows():
-            src = row["FullPath"]
+            src_path = row["FullPath"]
             created_dt = row["Created_Datetime"]
-            try:
-                rel = os.path.relpath(src, ROOT_DIR)
-                dst = os.path.join(destination_dir, rel)
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(src, dst)
-                success.append({"FullPath": src, "Created_Datetime": created_dt})
-                folder = rel.split(os.sep)[0]
-                stats[folder] = stats.get(folder, 0) + 1
-            except Exception as e:
-                fail.append({"FullPath": src, "Created_Datetime": created_dt, "Reason": str(e)})
-                self.log(f"❌ Failed to copy: {src} — {e}")
+            rel_path = os.path.relpath(src_path, ROOT_DIR)
+            args_list.append((src_path, rel_path, created_dt, ROOT_DIR, dest_root))
 
-        # === Save CSV ===
-        df_success = pd.DataFrame(success)
-        df_unsuccess = pd.DataFrame(fail)
+        results = []
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(self.copy_file, args_list))
 
+        df_success = pd.DataFrame([r for r in results if r["Success"]])
+        df_fail = pd.DataFrame([r for r in results if not r["Success"]])
+        folder_stats = df_success["TopFolder"].value_counts().to_dict()
+
+        # Save updated CSV
+        df_success["Created_Datetime"] = pd.to_datetime(df_success["Created_Datetime"], dayfirst=True, errors='coerce')
         cutoff_60 = today - timedelta(days=60)
         df_existing = df_existing[df_existing["Created_Datetime"] >= cutoff_60]
-        df_success["Created_Datetime"] = pd.to_datetime(df_success["Created_Datetime"], dayfirst=True, errors='coerce')
         df_success = df_success[df_success["Created_Datetime"] >= cutoff_60]
+        combined = pd.concat([df_success[["FullPath", "Created_Datetime"]], df_existing], ignore_index=True)
+        combined["Created_Datetime"] = combined["Created_Datetime"].dt.strftime("%d/%m/%Y %H:%M:%S")
+        combined.to_csv(CSV_PATH, index=False)
 
-        final = pd.concat([df_success, df_existing], ignore_index=True)
-        final["Created_Datetime"] = final["Created_Datetime"].dt.strftime("%d/%m/%Y %H:%M:%S")
-        final.to_csv(CSV_PATH, index=False)
-
-        self.log(f"✅ Total files copied successfully: {len(df_success)}")
-        self.log(f"❌ Total files failed to copy: {len(df_unsuccess)}")
+        self.log(f"\n✅ Total files copied successfully: {len(df_success)}")
+        self.log(f"❌ Total files failed to copy: {len(df_fail)}")
         self.log(f"🕒 Total execution time: {time.time() - start_time:.2f} seconds")
 
         self.log("\n📊 Summary report:")
-        for folder, count in stats.items():
+        for folder, count in folder_stats.items():
             self.log(f"   {folder}: {count}")
 
-        self.log("✅ Done!")
+        self.log("🎉 Done!")
 
 
 if __name__ == "__main__":
